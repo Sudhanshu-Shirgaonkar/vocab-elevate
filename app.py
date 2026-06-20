@@ -1,8 +1,8 @@
 import os
-import sqlite3
 import json
 import math
 from datetime import datetime
+import psycopg2  # Changed from sqlite3 to psycopg2
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -10,18 +10,30 @@ from pydantic import BaseModel, Field
 from typing import List
 
 # ----------------------------------------------------
-# HARDCODED CONFIGURATION
+# HARDCODED CONFIGURATION & ENVIRONMENT DB SECRETS
 # ----------------------------------------------------
 APP_PASSWORD = os.environ.get("APP_PASSWORD")
 
+# Read Connection String from environment variables provided by your hosting provider
+# e.g., postgres://user:password@hostname:5432/dbname
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
 # ----------------------------------------------------
-# 1. DATABASE SETUP
+# 1. DATABASE SETUP (POSTGRESQL SYNTAX)
 # ----------------------------------------------------
-DB_NAME = "dictionary_cache.db"
+def get_db_connection():
+    """Returns a connected transaction instance to the PostgreSQL database cluster."""
+    if not DATABASE_URL:
+        st.error("Missing DB environment setup configuration. Please define DATABASE_URL in your management panel secrets.")
+        st.stop()
+    # SSL mode is required by modern serverless databases like Neon or Supabase
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    """Creates a production PostgreSQL database table using native data structures."""
+    conn = get_db_connection()
     cursor = conn.cursor()
+    # PostgreSQL uses VARCHAR/TEXT and natively typed TIMESTAMP declarations
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS cache (
             word TEXT PRIMARY KEY,
@@ -30,38 +42,52 @@ def init_db():
         )
     ''')
     conn.commit()
+    cursor.close()
     conn.close()
 
 def get_cached_word(word: str):
-    conn = sqlite3.connect(DB_NAME)
+    """Checks the live cloud database cluster for matching entries."""
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT data FROM cache WHERE word = ?", (word.strip().lower(),))
+    # PostgreSQL placeholder syntax changes from local '?' to '%s'
+    cursor.execute("SELECT data FROM cache WHERE word = %s", (word.strip().lower(),))
     row = cursor.fetchone()
+    cursor.close()
     conn.close()
     return row[0] if row else None
 
 def save_word_to_cache(word: str, json_data: str):
-    conn = sqlite3.connect(DB_NAME)
+    """Inserts or overwrites an active vocabulary tracking entry into Cloud PostgreSQL."""
+    conn = get_db_connection()
     cursor = conn.cursor()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute(
-        "INSERT OR REPLACE INTO cache (word, data, created_at) VALUES (?, ?, ?)", 
-        (word.strip().lower(), json_data, now)
-    )
+    
+    # PostgreSQL does not use "INSERT OR REPLACE". Instead, it utilizes standard ANSI "ON CONFLICT" UPSERT statements.
+    cursor.execute('''
+        INSERT INTO cache (word, data, created_at) 
+        VALUES (%s, %s, %s)
+        ON CONFLICT (word) 
+        DO UPDATE SET data = EXCLUDED.data, created_at = EXCLUDED.created_at
+    ''', (word.strip().lower(), json_data, now))
+    
     conn.commit()
+    cursor.close()
     conn.close()
 
 def delete_word_from_cache(word: str):
-    conn = sqlite3.connect(DB_NAME)
+    """Permanently drops the specified record row instance from the cloud table tracking."""
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM cache WHERE word = ?", (word.strip().lower(),))
+    cursor.execute("DELETE FROM cache WHERE word = %s", (word.strip().lower(),))
     conn.commit()
+    cursor.close()
     conn.close()
 
 def fetch_filtered_cached_words(search_query="", sort_by="Alphabetical"):
-    conn = sqlite3.connect(DB_NAME)
+    """Fetches text matches sequentially from the external live cluster."""
+    conn = get_db_connection()
     cursor = conn.cursor()
-    base_query = "SELECT word, data FROM cache WHERE word LIKE ?"
+    base_query = "SELECT word, data FROM cache WHERE word LIKE %s"
     param = f"%{search_query.strip().lower()}%"
     
     if sort_by == "Alphabetical":
@@ -73,9 +99,11 @@ def fetch_filtered_cached_words(search_query="", sort_by="Alphabetical"):
         
     cursor.execute(query, (param,))
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
     return rows
 
+# Run the schema validation check on cluster setup initialization
 init_db()
 
 # ----------------------------------------------------
@@ -100,32 +128,22 @@ class DictionaryEntry(BaseModel):
 # ----------------------------------------------------
 st.set_page_config(page_title="AI Smart Dictionary", page_icon="📖", layout="centered")
 
-# Initialize session state flag for authentication if it doesn't exist
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
 def check_password():
-    """Verifies password and stores state indicating browser has active access."""
     if st.session_state["password_input"] == APP_PASSWORD:
         st.session_state["authenticated"] = True
-        del st.session_state["password_input"]  # clear password from memory safely
+        del st.session_state["password_input"]  
     else:
         st.session_state["authenticated"] = False
         st.error("❌ Incorrect Password. Please try again.")
 
-# If user is not logged in, block the rest of the application layout
 if not st.session_state["authenticated"]:
     st.title("🔒 Protected Dictionary Access")
     st.write("This application is locked to prevent unauthorized modifications. Please enter the access password.")
-    
-    st.text_input(
-        "Enter Password:", 
-        type="password", 
-        key="password_input", 
-        on_change=check_password,
-        placeholder="Type password and press Enter..."
-    )
-    st.stop()  # Aborts script execution here; everything below remains completely invisible
+    st.text_input("Enter Password:", type="password", key="password_input", on_change=check_password, placeholder="Type password and press Enter...")
+    st.stop()
 
 
 # ----------------------------------------------------
@@ -133,10 +151,8 @@ if not st.session_state["authenticated"]:
 # ----------------------------------------------------
 st.title("📖 AI Dictionary & Word Repository")
 
-# Sidebar Configuration for API keys
 api_key = os.environ.get("GEMINI_API_KEY") or st.sidebar.text_input("Enter Gemini API Key", type="password")
 
-# Log out button in the sidebar
 if st.sidebar.button("Log Out"):
     st.session_state["authenticated"] = False
     st.rerun()
@@ -182,17 +198,14 @@ st.markdown("---")
 # --- SECTION 2: SORTED, PAGINATED & EXPANDABLE LIST WITH SEARCH ---
 st.markdown("### 🗂️ Stored Dictionary Words")
 
-# Global Text Filter Search Box
 search_query = st.text_input("🔍 Search existing words in your database:", placeholder="Type a word to filter immediately...")
 
-# Controls Layout for Listing Configuration
 col1, col2 = st.columns([2, 1])
 with col1:
     sort_choice = st.selectbox("Sort words by:", ["Alphabetical", "Newest First", "Oldest First"])
 with col2:
     items_per_page = st.selectbox("Words per page:", [5, 10, 20, 50], index=1)
 
-# Fetch sorted and filtered item list from database
 all_words = fetch_filtered_cached_words(search_query=search_query, sort_by=sort_choice)
 total_words = len(all_words)
 
@@ -202,7 +215,6 @@ if total_words == 0:
     else:
         st.info("Your dictionary database is currently empty. Add a word above to see it appear here!")
 else:
-    # Compute pagination slices on the filtered subset
     total_pages = math.ceil(total_words / items_per_page)
     current_page = st.number_input("Page Selector", min_value=1, max_value=max(1, total_pages), step=1, value=1, label_visibility="collapsed")
     
@@ -212,7 +224,6 @@ else:
 
     st.caption(f"Showing words {start_idx + 1} - {min(end_idx, total_words)} of **{total_words}** matching items")
 
-    # Display entries cleanly using interactive accordions
     for word_name, raw_json in page_words:
         try:
             entry = DictionaryEntry.model_validate_json(raw_json)
@@ -223,7 +234,6 @@ else:
                 st.markdown(f"**Opposite:** {entry.opposite}")
                 st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
                 
-                # Iterating over multi-sense components gracefully inside the accordion
                 for i, sense in enumerate(entry.meanings, start=1):
                     st.markdown(f"**Meaning {i}:**")
                     st.write(f"💡 {sense.meaning_english} | **{sense.meaning_marathi}**")
