@@ -12,8 +12,6 @@ from typing import List
 # ----------------------------------------------------
 # HARDCODED CONFIGURATION & ENVIRONMENT DB SECRETS
 # ----------------------------------------------------
-APP_PASSWORD = os.environ.get("APP_PASSWORD")
-
 # Read Connection String from environment variables provided by your hosting provider
 # e.g., postgres://user:password@hostname:5432/dbname
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -124,38 +122,13 @@ class DictionaryEntry(BaseModel):
 
 
 # ----------------------------------------------------
-# 3. STREAMLIT AUTHENTICATION GATE
+# 3. MAIN WEB APPLICATION SETUP
 # ----------------------------------------------------
 st.set_page_config(page_title="AI Smart Dictionary", page_icon="📖", layout="centered")
 
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-
-def check_password():
-    if st.session_state["password_input"] == APP_PASSWORD:
-        st.session_state["authenticated"] = True
-        del st.session_state["password_input"]  
-    else:
-        st.session_state["authenticated"] = False
-        st.error("❌ Incorrect Password. Please try again.")
-
-if not st.session_state["authenticated"]:
-    st.title("🔒 Protected Dictionary Access")
-    st.write("This application is locked to prevent unauthorized modifications. Please enter the access password.")
-    st.text_input("Enter Password:", type="password", key="password_input", on_change=check_password, placeholder="Type password and press Enter...")
-    st.stop()
-
-
-# ----------------------------------------------------
-# 4. MAIN WEB APPLICATION (Only accessible if authenticated)
-# ----------------------------------------------------
 st.title("📖 AI Dictionary & Word Repository")
 
 api_key = os.environ.get("GEMINI_API_KEY") or st.sidebar.text_input("Enter Gemini API Key", type="password")
-
-if st.sidebar.button("Log Out"):
-    st.session_state["authenticated"] = False
-    st.rerun()
 
 # --- SECTION 1: SEARCH & ADD NEW WORD ---
 st.markdown("### ➕ Add New Word")
